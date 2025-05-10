@@ -27,11 +27,11 @@ package main
 
 import (
 	"fmt"
-	"github.com/anmitsu/go-shlex"
 	"io"
-	"io/ioutil"
 	"os"
 	"strings"
+
+	"github.com/anmitsu/go-shlex"
 )
 
 // Read the input file and return all lines that look like legacy configuration
@@ -39,7 +39,7 @@ import (
 func readLegacyConf(f io.Reader) ([]string, error) {
 	var lines []string
 
-	data, err := ioutil.ReadAll(f)
+	data, err := io.ReadAll(f)
 	if err != nil {
 		return lines, fmt.Errorf("could not read file: %w", err)
 	}
@@ -239,7 +239,7 @@ func convertLegacyConf(oldConf []string) string {
 		case "PGBK_DBLIST", "PGBK_EXCLUDE":
 			// The separator for lists of databases now the comma
 			dbs := make([]string, 0)
-			for _, d := range strings.Split(strings.Trim(value, "'\""), " ") {
+			for d := range strings.SplitSeq(strings.Trim(value, "'\""), " ") {
 				if len(d) > 0 {
 					dbs = append(dbs, d)
 				}

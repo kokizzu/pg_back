@@ -50,6 +50,7 @@ type options struct {
 	NoConfigFile      bool
 	BinDirectory      string
 	Directory         string
+	Mode              int
 	Host              string
 	Port              int
 	Username          string
@@ -82,19 +83,20 @@ type options struct {
 	WithRolePasswords bool
 	DumpOnly          bool
 
-	Upload       string // values are none, b2, s3, sftp, gcs
-	UploadPrefix string
-	Download     string // values are none, b2, s3, sftp, gcs
-	ListRemote   string // values are none, b2, s3, sftp, gcs
-	PurgeRemote  bool
-	S3Region     string
-	S3Bucket     string
-	S3EndPoint   string
-	S3Profile    string
-	S3KeyID      string
-	S3Secret     string
-	S3ForcePath  bool
-	S3DisableTLS bool
+	Upload         string // values are none, b2, s3, sftp, gcs
+	UploadPrefix   string
+	DeleteUploaded bool
+	Download       string // values are none, b2, s3, sftp, gcs
+	ListRemote     string // values are none, b2, s3, sftp, gcs
+	PurgeRemote    bool
+	S3Region       string
+	S3Bucket       string
+	S3EndPoint     string
+	S3Profile      string
+	S3KeyID        string
+	S3Secret       string
+	S3ForcePath    bool
+	S3DisableTLS   bool
 
 	B2Bucket                string
 	B2KeyID                 string
@@ -129,6 +131,7 @@ func defaultOptions() options {
 	return options{
 		NoConfigFile:            false,
 		Directory:               "/var/backups/postgresql",
+		Mode:                    0o600,
 		Format:                  'c',
 		DirJobs:                 1,
 		CompressLevel:           -1,
@@ -159,6 +162,17 @@ type parseCliResult struct {
 
 func (*parseCliResult) Error() string {
 	return "please exit now"
+}
+
+func validateMode(s string) (int, error) {
+	if (strings.HasPrefix(s, "0") && len(s) <= 5) || (strings.HasPrefix(s, "-")) {
+		mode, err := strconv.ParseInt(s, 0, 32)
+		if err != nil {
+			return 0, fmt.Errorf("Invalid permission %q", s)
+		}
+		return int(mode), nil
+	}
+	return 0, fmt.Errorf("Invalid permission %q, must be octal (start by 0 and max 5 digits) number or negative", s)
 }
 
 func validateDumpFormat(s string) error {
@@ -251,7 +265,7 @@ func validateDirectory(s string) error {
 }
 
 func parseCli(args []string) (options, []string, error) {
-	var format, purgeKeep, purgeInterval string
+	var format, mode, purgeKeep, purgeInterval string
 
 	opts := defaultOptions()
 	pce := &parseCliResult{}
@@ -268,6 +282,7 @@ func parseCli(args []string) (options, []string, error) {
 	pflag.BoolVar(&opts.NoConfigFile, "no-config-file", false, "skip reading config file\n")
 	pflag.StringVarP(&opts.BinDirectory, "bin-directory", "B", "", "PostgreSQL binaries directory. Empty to search $PATH")
 	pflag.StringVarP(&opts.Directory, "backup-directory", "b", "/var/backups/postgresql", "store dump files there")
+	pflag.StringVarP(&mode, "backup-file-mode", "m", "0600", "mode to apply to dump files")
 	pflag.StringVarP(&opts.CfgFile, "config", "c", defaultCfgFile, "alternate config file")
 	pflag.StringSliceVarP(&opts.ExcludeDbs, "exclude-dbs", "D", []string{}, "list of databases to exclude")
 	pflag.BoolVarP(&opts.WithTemplates, "with-templates", "t", false, "include templates")
@@ -297,6 +312,7 @@ func parseCli(args []string) (options, []string, error) {
 
 	pflag.StringVar(&opts.Upload, "upload", "none", "upload produced files to target (s3, gcs,..) use \"none\" to override\nconfiguration file and disable upload")
 	pflag.StringVar(&opts.UploadPrefix, "upload-prefix", "", "add this prefix to uploaded files, similar to a target directory")
+	deleteUploaded := pflag.String("delete-uploaded", "no", "delete local file after upload")
 	pflag.StringVar(&opts.Download, "download", "none", "download files from target (s3, gcs,..) instead of dumping. DBNAMEs become\nglobs to select files")
 	pflag.StringVar(&opts.ListRemote, "list-remote", "none", "list the remote files on s3, gcs, sftp, azure instead of dumping. DBNAMEs become\nglobs to select files")
 	purgeRemote := pflag.String("purge-remote", "no", "purge the file on remote location after upload, with the same rules\nas the local directory")
@@ -414,6 +430,12 @@ func parseCli(args []string) (options, []string, error) {
 		changed = append(changed, "include-dbs")
 	}
 
+	parsed_mode, err := validateMode(mode)
+	if err != nil {
+		return opts, changed, fmt.Errorf("invalid value for --backup-file-mode: %s", err)
+	}
+	opts.Mode = parsed_mode
+
 	// Validate purge keep and time limit
 	keep, err := validatePurgeKeepValue(purgeKeep)
 	if err != nil {
@@ -473,6 +495,11 @@ func parseCli(args []string) (options, []string, error) {
 		return opts, changed, fmt.Errorf("invalid value for --list-remote: %s", err)
 	}
 
+	opts.DeleteUploaded, err = validateYesNoOption(*deleteUploaded)
+	if err != nil {
+		return opts, changed, fmt.Errorf("invalid value for --delete-uploaded: %s", err)
+	}
+
 	opts.PurgeRemote, err = validateYesNoOption(*purgeRemote)
 	if err != nil {
 		return opts, changed, fmt.Errorf("invalid value for --purge-remote: %s", err)
@@ -520,7 +547,7 @@ func validateConfigurationFile(cfg *ini.File) error {
 	s, _ := cfg.GetSection(ini.DefaultSection)
 
 	known_globals := []string{
-		"bin_directory", "backup_directory", "timestamp_format", "host", "port", "user",
+		"bin_directory", "backup_directory", "backup_file_mode", "timestamp_format", "host", "port", "user",
 		"dbname", "exclude_dbs", "include_dbs", "with_templates", "format",
 		"parallel_backup_jobs", "compress_level", "jobs", "pause_timeout",
 		"purge_older_than", "purge_min_keep", "checksum_algorithm", "pre_backup_hook",
@@ -532,7 +559,7 @@ func validateConfigurationFile(cfg *ini.File) error {
 		"sftp_port", "sftp_user", "sftp_password", "sftp_directory", "sftp_identity",
 		"sftp_ignore_hostkey", "gcs_bucket", "gcs_endpoint", "gcs_keyfile",
 		"azure_container", "azure_account", "azure_key", "azure_endpoint", "pg_dump_options",
-		"dump_role_passwords", "dump_only", "upload_prefix",
+		"dump_role_passwords", "dump_only", "upload_prefix", "delete_uploaded",
 	}
 
 gkLoop:
@@ -574,7 +601,7 @@ gkLoop:
 }
 
 func loadConfigurationFile(path string) (options, error) {
-	var format, purgeKeep, purgeInterval string
+	var format, mode, purgeKeep, purgeInterval string
 
 	opts := defaultOptions()
 
@@ -600,6 +627,7 @@ func loadConfigurationFile(path string) (options, error) {
 	// flags
 	opts.BinDirectory = s.Key("bin_directory").MustString("")
 	opts.Directory = s.Key("backup_directory").MustString("/var/backups/postgresql")
+	mode = s.Key("backup_file_mode").MustString("0600")
 	timeFormat := s.Key("timestamp_format").MustString("rfc3339")
 	opts.Host = s.Key("host").MustString("")
 	opts.Port = s.Key("port").MustInt(0)
@@ -628,6 +656,7 @@ func loadConfigurationFile(path string) (options, error) {
 
 	opts.Upload = s.Key("upload").MustString("none")
 	opts.UploadPrefix = s.Key("upload_prefix").MustString("")
+	opts.DeleteUploaded = s.Key("delete_uploaded").MustBool(false)
 	opts.PurgeRemote = s.Key("purge_remote").MustBool(false)
 
 	opts.B2Bucket = s.Key("b2_bucket").MustString("")
@@ -661,6 +690,13 @@ func loadConfigurationFile(path string) (options, error) {
 	opts.AzureAccount = s.Key("azure_account").MustString("")
 	opts.AzureKey = s.Key("azure_key").MustString("")
 	opts.AzureEndpoint = s.Key("azure_endpoint").MustString("blob.core.windows.net")
+
+	// Validate mode and convert to int
+	m, err := validateMode(mode)
+	if err != nil {
+		return opts, err
+	}
+	opts.Mode = m
 
 	// Validate purge keep and time limit
 	keep, err := validatePurgeKeepValue(purgeKeep)
@@ -811,6 +847,8 @@ func mergeCliAndConfigOptions(cliOpts options, configOpts options, onCli []strin
 			opts.BinDirectory = cliOpts.BinDirectory
 		case "backup-directory":
 			opts.Directory = cliOpts.Directory
+		case "backup-file-mode":
+			opts.Mode = cliOpts.Mode
 		case "exclude-dbs":
 			opts.ExcludeDbs = cliOpts.ExcludeDbs
 		case "include-dbs":
